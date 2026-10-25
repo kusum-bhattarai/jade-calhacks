@@ -88,6 +88,7 @@ sequenceDiagram
 | `tpa/sod.py` | segregation of duties, `can_approve` |
 | `tpa/players.py`, `tpa/autopilot.py` | played humans for unattended runs; last year's answers as a baseline |
 | `tpa/cycle.py` | the monthly engine and the period state machine; late backup, handoffs |
+| `tpa/graph.py` | the close as a LangGraph agent: runs the month, interrupts for each card and the sign-off |
 | `tpa/execute.py` | every posting a decision can lead to |
 | `tpa/restate.py` | restatement: catch-ups into closed months, withdrawing our own superseded disputes |
 | `tpa/ledger.py` | `post_journal`, the only write path; its docstring is the posting contract |
@@ -117,3 +118,26 @@ allows the agent, and never approves or signs.
 
 `judgment.hooks()` wires the judgment engine with cards left for people; `players.hooks()` adds the played
 humans. Finding `evidence` always carries `summary`, `control` and the ids involved.
+
+## The close as a LangGraph agent
+
+`tpa/graph.py` wraps one month's close in a LangGraph `StateGraph`, so a person can work it from a paused,
+checkpointed graph instead of the inbox:
+
+```
+START → run_month → cards ⇄ (one card per pass) → sign → report → END
+```
+
+- **run_month** is `cycle.step` with `judgment.hooks()`: the engine runs exactly as it does from the API.
+- **cards** raises a LangGraph `interrupt` for each open card, addressed to the person it is for. The reply
+  (`{"answer", "answered_by"?, "reasoning"?}`, or `{"skip": true}`) goes through `judgment.answer`, so
+  roles, segregation of duties and the reasoning an override needs are checked as they are at the API. A
+  refused answer is logged and the same card is asked again; a blocked attempt is still recorded as a finding.
+- **sign** interrupts once with each unsigned customer's open findings and failing gates; the reply
+  (`{"customers": [...], "signed_by"?}`) signs through `gates.sign_period`, so a failing gate still blocks.
+- **report** returns each customer's period state and any cards still open.
+
+The graph orchestrates and never computes an amount: every posting still goes through `tpa.execute` and
+`post_journal`. Each node opens its own connection and commits before it returns, so a checkpointed graph
+can resume later, from another process. `scripts/graph_close.py` drives it at the terminal
+(`--recommended` takes every recommendation and signs what is clean).
